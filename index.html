@@ -1,0 +1,1037 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>Finance Team Task Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<!--
+  ============================================================================
+  Finance Team Task Tracker  (single file, host it anywhere static, e.g. GitHub Pages)
+
+  How it works
+  - Task definitions live in Supabase (table tt_tasks) and are NOT editable from
+    this page. Team members can only record Done / Pending + remarks per occurrence.
+  - Each person signs in with their name + PIN. The PIN is checked on the server
+    inside the database functions, which return only that person's own tasks.
+    The admin login sees the whole team.
+  - The key below is a Supabase *publishable* key: it is meant to be public.
+    It cannot read the tables directly (RLS + revoked grants); it can only call
+    the tt_* functions, and every one of those requires a valid PIN.
+
+  Settings you may want to change are in CONFIG at the top of the script:
+    WORKDAYS        which weekdays daily tasks fall on (0=Sun ... 6=Sat)
+    HOLIDAYS        dates (YYYY-MM-DD) on which daily/weekly tasks are skipped
+    TRACKING_START  occurrences before this date are ignored (clean first month)
+
+  Adding people or tasks: insert rows in tt_members / tt_tasks (see README notes
+  sent with this file, or the SQL comments at the bottom of this file).
+  ============================================================================
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f2f4f6;
+    --surface: #ffffff;
+    --surface-2: #f6f8fa;
+    --ink: #16212b;
+    --ink-2: #51606e;
+    --muted: #8a949e;
+    --line: #e2e7ec;
+    --line-2: #c9d1d9;
+    --accent: #0f5c78;
+    --accent-ink: #ffffff;
+    --accent-soft: #e2eff4;
+    --focus: #2a78d6;
+    --good: #0ca30c;      --good-ink: #006300;  --good-soft: #e4f5e4;
+    --warn: #fab219;      --warn-ink: #7a4f00;  --warn-soft: #fff2d1;
+    --bad: #d03b3b;       --bad-ink: #a12b2b;   --bad-soft: #fbe5e5;
+    --series: #2a78d6;    --series-track: #cde2fb;
+    --radius: 6px;
+    --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #121619;
+      --surface: #1a2026;
+      --surface-2: #20272e;
+      --ink: #edf1f4;
+      --ink-2: #b5bec7;
+      --muted: #86909a;
+      --line: #2a333c;
+      --line-2: #3b4651;
+      --accent: #5eb4d4;
+      --accent-ink: #0b1b22;
+      --accent-soft: #17333f;
+      --focus: #6da7ec;
+      --good-ink: #49c349;  --good-soft: #17301b;
+      --warn-ink: #f6c04d;  --warn-soft: #3a2d0c;
+      --bad-ink: #f07c7c;   --bad-soft: #3d1a1a;
+      --series: #3987e5;    --series-track: #1c3a5e;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: var(--font); font-size: 14px; line-height: 1.45;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { font-size: 22px; line-height: 1.25; }
+  h2 { font-size: 15px; }
+  h3 { font-size: 16px; }
+  p { margin: 0; }
+  .muted { color: var(--muted); }
+  .meta { color: var(--ink-2); font-size: 12px; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; flex-direction: column; line-height: 1.2; margin-right: auto; }
+  .brand strong { font-weight: 600; font-size: 15px; }
+  .brand span { font-size: 12px; color: var(--muted); }
+  .monthnav { display: flex; align-items: center; gap: 4px; }
+  .monthnav .label { min-width: 132px; text-align: center; font-weight: 500; }
+  .iconbtn {
+    width: 30px; height: 30px; display: inline-grid; place-items: center;
+    border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--surface);
+  }
+  .iconbtn:disabled { opacity: .35; cursor: default; }
+  .iconbtn svg { width: 14px; height: 14px; }
+  .userbox { display: flex; align-items: center; gap: 10px; }
+  .userbox .who { display: flex; flex-direction: column; line-height: 1.2; text-align: right; }
+  .userbox .who strong { font-weight: 500; }
+  .userbox .who span { font-size: 12px; color: var(--muted); }
+  @media (max-width: 640px) {
+    .topbar { gap: 10px 14px; padding: 8px 12px; }
+    .brand { flex-basis: 100%; }
+    .brand span { display: none; }
+    .monthnav { margin-right: auto; }
+    .monthnav .label { min-width: 0; padding: 0 6px; }
+    .userbox .who span { display: none; }
+    main { padding: 16px 12px 60px; }
+    .panel-head, .row, .attn { padding-left: 12px; padding-right: 12px; }
+    .grid .task-col { min-width: 160px; max-width: 200px; }
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--surface);
+    font-size: 13px; line-height: 1.3; white-space: nowrap;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); padding-inline: 8px; }
+  .btn.quiet:hover { background: var(--surface-2); color: var(--ink); }
+  .btn.sm { padding: 3px 9px; font-size: 12px; }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  /* ---------- page ---------- */
+  main { max-width: 1240px; margin: 0 auto; padding: 22px 16px 70px; }
+  main.is-loading { opacity: .55; pointer-events: none; }
+  .pagehead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .pagehead .lede { margin-top: 4px; color: var(--ink-2); max-width: 70ch; }
+  .panel { margin-top: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  .panel-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+  }
+  .panel-head .meta { margin-left: auto; }
+  .panel-body { padding: 12px 16px; }
+  .empty { padding: 22px 16px; color: var(--ink-2); }
+  .filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+  .filters label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  .filters .spacer { flex: 1; }
+  select.ctl, input.ctl {
+    padding: 6px 10px; border: 1px solid var(--line-2); border-radius: var(--radius);
+    background: var(--surface); color: var(--ink); font-size: 13px;
+  }
+
+  /* ---------- today list ---------- */
+  .row {
+    display: grid; grid-template-columns: minmax(220px, 1.6fr) minmax(130px, .9fr) 164px minmax(220px, 2fr) 104px;
+    gap: 12px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--line);
+  }
+  .row.head { border-top: 0; padding-top: 10px; padding-bottom: 6px; font-size: 12px; color: var(--muted); }
+  .row.sub { display: block; padding: 8px 16px 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--surface-2); }
+  .row .t { font-weight: 500; }
+  .row .c-due { font-size: 13px; color: var(--ink-2); }
+  .row .c-due.late { color: var(--bad-ink); font-weight: 500; }
+  .row .c-due.today { color: var(--ink); }
+  .row .c-upd { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .row.is-done .t { color: var(--ink-2); }
+  @media (max-width: 880px) {
+    .row { grid-template-columns: 1fr auto; row-gap: 8px; }
+    .row.head { display: none; }
+    .row .c-task { grid-column: 1 / -1; }
+    .row .c-due { grid-column: 1 / 2; }
+    .row .c-status { grid-column: 2 / 3; justify-self: end; }
+    .row .c-remarks { grid-column: 1 / -1; }
+    .row .c-upd { grid-column: 1 / -1; text-align: left; }
+  }
+
+  .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+  .seg button { border: 0; background: transparent; padding: 5px 12px; font-size: 13px; color: var(--ink-2); }
+  .seg button + button { border-left: 1px solid var(--line-2); }
+  .seg button:hover { background: var(--surface-2); }
+  .seg button.on-done { background: var(--good-soft); color: var(--good-ink); font-weight: 600; }
+  .seg button.on-pending { background: var(--surface-2); color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px var(--line-2); }
+  .seg.big button { padding: 8px 18px; font-size: 14px; }
+  .seg button:focus-visible { outline-offset: -2px; }
+
+  input.remarks, textarea.remarks {
+    width: 100%; padding: 6px 9px; border: 1px solid var(--line-2); border-radius: var(--radius);
+    background: var(--surface); color: var(--ink); font-size: 13px;
+  }
+  input.remarks::placeholder, textarea.remarks::placeholder { color: var(--muted); }
+  textarea.remarks { resize: vertical; min-height: 72px; }
+
+  /* overdue chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px;
+    border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); font-size: 12px;
+  }
+  .chip:hover { background: var(--surface-2); }
+  .chip svg { width: 12px; height: 12px; }
+  .attn { display: grid; grid-template-columns: minmax(220px, 1fr) 2.2fr; gap: 10px 16px; padding: 10px 16px; border-top: 1px solid var(--line); align-items: start; }
+  .attn .t { font-weight: 500; }
+  @media (max-width: 720px) { .attn { grid-template-columns: 1fr; } }
+
+  /* ---------- month grid ---------- */
+  .gridwrap { overflow-x: auto; }
+  table.grid { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: 12px; }
+  .grid th, .grid td { padding: 0; text-align: center; border-bottom: 1px solid var(--line); height: 28px; }
+  .grid thead th { height: 36px; vertical-align: bottom; padding-bottom: 4px; color: var(--muted); font-weight: 500; }
+  .grid thead th .dn { display: block; font-size: 12px; color: var(--ink-2); }
+  .grid thead th .dw { display: block; font-size: 10px; }
+  .grid .task-col {
+    text-align: left; padding: 0 12px; position: sticky; left: 0; z-index: 1; background: var(--surface);
+    min-width: 230px; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px;
+    box-shadow: 1px 0 0 var(--line);
+  }
+  .grid thead .task-col { background: var(--surface); }
+  .grid td.day, .grid th.day { width: 28px; min-width: 28px; }
+  .grid .wkend { background: var(--surface-2); }
+  .grid .today { background: var(--accent-soft); }
+  .grid thead th.today .dn { color: var(--accent); font-weight: 600; }
+  .grid tr.group td { text-align: left; padding: 5px 12px; background: var(--surface-2); color: var(--ink-2); font-weight: 600; height: auto; }
+  .grid tr.group td.task-col { box-shadow: none; }
+  button.dot {
+    width: 24px; height: 24px; padding: 0; border: 0; background: transparent; border-radius: 50%;
+    display: inline-grid; place-items: center; position: relative; vertical-align: middle;
+  }
+  button.dot:hover:not(:disabled) { background: rgba(127,127,127,.15); }
+  button.dot:disabled { cursor: default; }
+  .dot svg { width: 14px; height: 14px; display: block; }
+  .dot.has-note::after {
+    content: ""; position: absolute; right: 2px; bottom: 2px; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--ink-2); box-shadow: 0 0 0 1.5px var(--surface);
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px 16px; font-size: 12px; color: var(--ink-2); border-top: 1px solid var(--line); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend svg { width: 13px; height: 13px; }
+  .legend .sw { width: 13px; height: 13px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--line-2); }
+  .legend .notedot { width: 5px; height: 5px; border-radius: 50%; background: var(--ink-2); margin: 0 4px; }
+
+  /* ---------- admin ---------- */
+  .figures {
+    margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  }
+  .fig { background: var(--surface); padding: 14px 16px; }
+  .fig .label { font-size: 12px; color: var(--muted); }
+  .fig .value { font-size: 26px; font-weight: 600; line-height: 1.2; margin-top: 2px; }
+  .fig .value small { font-size: 14px; font-weight: 500; color: var(--ink-2); margin-left: 5px; }
+  .fig .sub { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .data th { text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .data td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .data tr:last-child td { border-bottom: 0; }
+  .data th.num, .data td.num { text-align: right; }
+  .data td.name { font-weight: 500; white-space: nowrap; }
+  .data td.remarks { color: var(--ink-2); max-width: 360px; }
+  .data .pill { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .data .pill svg { width: 13px; height: 13px; }
+  .tablewrap { overflow-x: auto; }
+  .meter { display: inline-block; width: 110px; height: 6px; border-radius: 3px; background: var(--series-track); vertical-align: middle; margin-right: 8px; overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--series); border-radius: 3px; }
+  .count-bad { color: var(--bad-ink); font-weight: 600; }
+
+  .trend { display: block; width: 100%; height: auto; }
+  .trend .gl { stroke: var(--line); stroke-width: 1; }
+  .trend .tick, .trend .xlab { fill: var(--muted); font-size: 11px; font-family: var(--font); }
+  .trend .fill { fill: var(--series); }
+  .trend .hit { fill: transparent; }
+  .trend .bar:hover .fill, .trend .bar:focus .fill { fill: var(--accent); }
+  .trend .bar:focus { outline: none; }
+  details.tableview { margin-top: 8px; font-size: 13px; }
+  details.tableview summary { cursor: pointer; color: var(--ink-2); }
+  details.tableview table { margin-top: 8px; }
+
+  /* ---------- login ---------- */
+  .login { max-width: 400px; margin: 60px auto 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 26px 26px 22px; }
+  .login h1 { font-size: 20px; }
+  .login p { margin-top: 4px; color: var(--ink-2); }
+  .field { display: block; margin-top: 16px; font-size: 13px; color: var(--ink-2); }
+  .field > select, .field > input, .field > textarea {
+    display: block; width: 100%; margin-top: 5px; padding: 8px 10px; border: 1px solid var(--line-2);
+    border-radius: var(--radius); background: var(--surface); color: var(--ink); font-size: 14px;
+  }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 13px; color: var(--ink-2); }
+  .login .btn.primary { width: 100%; justify-content: center; margin-top: 18px; padding: 9px; font-size: 14px; }
+  .error { margin-top: 10px; color: var(--bad-ink); font-size: 13px; min-height: 1.4em; }
+
+  /* ---------- dialogs, tooltip, toast ---------- */
+  dialog { border: 1px solid var(--line); border-radius: 10px; padding: 0; background: var(--surface); color: var(--ink); width: min(460px, 92vw); }
+  dialog::backdrop { background: rgba(10, 16, 22, .4); }
+  .dlg { padding: 20px 22px 18px; }
+  .dlg .meta { margin-top: 4px; }
+  .dlg .seg { margin-top: 14px; }
+  .dlg .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .dlg .kv { margin-top: 12px; display: grid; grid-template-columns: 90px 1fr; gap: 6px 12px; font-size: 13px; }
+  .dlg .kv dt { color: var(--muted); }
+  .dlg .kv dd { margin: 0; }
+  .tip {
+    position: fixed; z-index: 20; pointer-events: none; max-width: 300px; padding: 7px 10px;
+    background: var(--ink); color: var(--page); font-size: 12px; line-height: 1.4; border-radius: 6px;
+    white-space: pre-line; box-shadow: 0 4px 14px rgba(0,0,0,.18); opacity: 0; transition: opacity .12s;
+  }
+  .tip.show { opacity: 1; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30;
+    padding: 9px 14px; border-radius: 8px; background: var(--ink); color: var(--page); font-size: 13px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.2); opacity: 0; transition: opacity .15s; pointer-events: none; max-width: 90vw;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { background: var(--bad); color: #fff; }
+  @media (prefers-reduced-motion: reduce) { .tip, .toast { transition: none; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><strong>Task Tracker</strong><span>Petra Brands finance team</span></div>
+  <div class="monthnav" id="monthnav" hidden>
+    <button class="iconbtn" id="prevMonth" type="button" aria-label="Previous month">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span class="label" id="monthLabel"></span>
+    <button class="iconbtn" id="nextMonth" type="button" aria-label="Next month">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="btn quiet sm" id="thisMonth" type="button">This month</button>
+  </div>
+  <div class="userbox" id="userbox" hidden>
+    <div class="who"><strong id="userName"></strong><span id="userRole"></span></div>
+    <button class="btn quiet sm" id="changePin" type="button">Change PIN</button>
+    <button class="btn sm" id="signOut" type="button">Sign out</button>
+  </div>
+</header>
+
+<main id="app"><noscript><p class="empty">This page needs JavaScript to run.</p></noscript></main>
+
+<dialog id="dlg"></dialog>
+<div class="tip" id="tip" role="tooltip"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+/* =========================== CONFIG =========================== */
+const CONFIG = {
+  SUPABASE_URL: 'https://cobtxyhlhcvshrcaamlg.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_YH99BN26wM8Ym_54v0Kk4g_amOw2hTK',   // publishable key: safe to expose
+  TIMEZONE: 'Asia/Karachi',          // used for "today" and for timestamps
+  WORKDAYS: [1, 2, 3, 4, 5],         // days daily tasks fall on: 0=Sun 1=Mon ... 6=Sat
+  HOLIDAYS: [],                      // e.g. ['2026-12-25'] - no daily/weekly occurrences on these dates
+  TRACKING_START: '2026-10-12',      // occurrences before this date are ignored
+  SOON_DAYS: 3,                      // monthly tasks appear under "Coming up" this many days ahead
+};
+
+/* =========================== helpers =========================== */
+const $ = (sel, root = document) => root.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = n => String(n).padStart(2, '0');
+const ymd = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`;
+const dateUTC = ds => { const [y, m, d] = ds.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+const weekday = ds => dateUTC(ds).getUTCDay();
+const daysBetween = (a, b) => Math.round((dateUTC(b) - dateUTC(a)) / 86400000);
+function monthInfo(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return { y, m, days, start: ymd(y, m, 1), end: ymd(y, m, days) };
+}
+function shiftMonth(ym, n) {
+  let [y, m] = ym.split('-').map(Number); m += n;
+  while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; }
+  return `${y}-${pad(m)}`;
+}
+const F = {
+  long:  new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }),
+  short: new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }),
+  day:   new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }),
+  month: new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
+  stamp: new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: CONFIG.TIMEZONE }),
+};
+const fmt = (f, ds) => F[f].format(dateUTC(ds));
+const fmtStamp = iso => F.stamp.format(new Date(iso));
+const localToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: CONFIG.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+
+const ICON = {
+  done:     '<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6.5" fill="var(--good)"/><path d="M4 7.3l2 2 4-4.6" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  overdue:  '<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6.5" fill="var(--bad)"/><path d="M4.6 4.6l4.8 4.8M9.4 4.6l-4.8 4.8" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  due:      '<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6.5" fill="var(--warn)"/><circle cx="7" cy="7" r="2.1" fill="#fff"/></svg>',
+  upcoming: '<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--line-2)" stroke-width="1.6"/></svg>',
+};
+const STATE_LABEL = { done: 'Done', overdue: 'Not done', due: 'Due today', upcoming: 'Not yet due' };
+
+/* =========================== API =========================== */
+class ApiError extends Error { constructor(code, message) { super(message); this.code = code; } }
+async function rpc(fn, params) {
+  let res;
+  try {
+    res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: 'POST',
+      headers: { apikey: CONFIG.SUPABASE_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(params || {}),
+    });
+  } catch (e) {
+    throw new ApiError('NETWORK', "Can't reach the server. Check your connection and try again.");
+  }
+  const text = await res.text();
+  let body = null; try { body = text ? JSON.parse(text) : null; } catch (e) { /* ignore */ }
+  if (!res.ok) {
+    const code = (body && body.message) || `HTTP ${res.status}`;
+    const msg = (body && (body.hint || body.message)) || `Request failed (${res.status})`;
+    throw new ApiError(code, msg);
+  }
+  return body;
+}
+
+/* =========================== state =========================== */
+const SKEY = 'tt.session.v1';
+const state = {
+  session: null,      // {id, name, role, pin}
+  today: null,        // 'YYYY-MM-DD' (server date in Karachi time)
+  month: null,        // 'YYYY-MM' being viewed
+  data: null,         // payload from tt_my_tasks / tt_admin_overview
+  loading: false,
+  saving: new Set(),  // keys task|date currently being saved
+  adminFilter: 'all', // 'all' | member id
+  showAllOpen: false,
+  members: null,      // sign-in list
+};
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem(SKEY) || sessionStorage.getItem(SKEY) || 'null'); } catch (e) { return null; }
+}
+function storeSession(s, remember) {
+  try { localStorage.removeItem(SKEY); sessionStorage.removeItem(SKEY); (remember ? localStorage : sessionStorage).setItem(SKEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+}
+function clearSession() { try { localStorage.removeItem(SKEY); sessionStorage.removeItem(SKEY); } catch (e) { /* ignore */ } }
+
+/* =========================== occurrences =========================== */
+function occurrences(task, ym) {
+  const mi = monthInfo(ym), out = [], start = CONFIG.TRACKING_START || '0000-00-00';
+  if (task.freq_type === 'monthly') {
+    const d = task.due_day ? Math.min(task.due_day, mi.days) : mi.days;
+    const date = ymd(mi.y, mi.m, d);
+    if (date >= start) out.push({ task, date, deadline: !task.due_day });
+    return out;
+  }
+  for (let d = 1; d <= mi.days; d++) {
+    const date = ymd(mi.y, mi.m, d);
+    if (date < start || CONFIG.HOLIDAYS.includes(date)) continue;
+    const wd = weekday(date);
+    const hit = task.freq_type === 'daily' ? CONFIG.WORKDAYS.includes(wd) : wd === task.weekday;
+    if (hit) out.push({ task, date });
+  }
+  return out;
+}
+function occState(o, today) {
+  if (o.rec && o.rec.status === 'Done') return 'done';
+  if (o.date > today) return 'upcoming';
+  if (o.date === today) return 'due';
+  return 'overdue';
+}
+function buildModel() {
+  const { data, today, month } = state;
+  const recMap = new Map(data.status.map(s => [s.task_id + '|' + s.due_date, s]));
+  const occs = [];
+  for (const t of data.tasks) {
+    for (const o of occurrences(t, month)) {
+      o.key = t.id + '|' + o.date;
+      o.rec = recMap.get(o.key) || null;
+      o.state = occState(o, today);
+      occs.push(o);
+    }
+  }
+  const byKey = new Map(occs.map(o => [o.key, o]));
+  return { occs, byKey };
+}
+function tipFor(o, memberName) {
+  const lines = [o.task.title + (memberName ? ` (${memberName})` : ''), `${fmt('short', o.date)}: ${STATE_LABEL[o.state]}${o.state === 'due' && o.rec ? ' (pending)' : ''}`];
+  if (o.rec && o.rec.remarks) lines.push('Remarks: ' + o.rec.remarks);
+  if (o.rec) lines.push('Updated ' + fmtStamp(o.rec.updated_at));
+  return lines.join('\n');
+}
+function dueLabel(o) {
+  const t = state.today;
+  if (o.deadline) return o.state === 'done' ? 'This month' : 'Per deadline, this month';
+  if (o.date === t) return 'Today';
+  const n = daysBetween(t, o.date);
+  if (n > 0) return `${fmt('day', o.date)} (in ${n} day${n === 1 ? '' : 's'})`;
+  return `${fmt('day', o.date)} (${-n} day${n === -1 ? '' : 's'} ago)`;
+}
+
+/* =========================== rendering =========================== */
+const app = $('#app');
+const dlg = $('#dlg');
+
+function render() {
+  // preserve focus / in-progress typing / horizontal scroll across re-render
+  const ae = document.activeElement;
+  const fkey = ae && ae.dataset ? ae.dataset.fkey : null;
+  const keep = fkey ? { value: ae.value, s: ae.selectionStart, e: ae.selectionEnd } : null;
+  const scrolls = [...app.querySelectorAll('.gridwrap')].map(el => el.scrollLeft);
+
+  if (!state.session) { renderLogin(); }
+  else if (!state.data) { app.innerHTML = '<p class="empty">Loading your tasks…</p>'; }
+  else if (state.session.role === 'admin') { renderAdmin(); }
+  else { renderMember(); }
+  app.classList.toggle('is-loading', state.loading && !!state.data);
+  renderChrome();
+
+  if (fkey) {
+    const el = app.querySelector(`[data-fkey="${CSS.escape(fkey)}"]`);
+    if (el) { el.value = keep.value; el.focus({ preventScroll: true }); try { el.setSelectionRange(keep.s, keep.e); } catch (e) { /* ignore */ } }
+  }
+  [...app.querySelectorAll('.gridwrap')].forEach((el, i) => { if (scrolls[i]) el.scrollLeft = scrolls[i]; });
+}
+
+function renderChrome() {
+  const signedIn = !!state.session;
+  $('#monthnav').hidden = !signedIn || !state.month;
+  $('#userbox').hidden = !signedIn;
+  if (!signedIn) return;
+  $('#userName').textContent = state.session.name;
+  $('#userRole').textContent = state.session.role === 'admin' ? 'Admin view' : 'My tasks';
+  if (state.month) {
+    $('#monthLabel').textContent = fmt('month', state.month + '-01');
+    const cur = (state.today || localToday()).slice(0, 7);
+    $('#nextMonth').disabled = state.month >= cur;
+    $('#thisMonth').hidden = state.month === cur;
+  }
+}
+
+/* ---------- sign in ---------- */
+function renderLogin(msg) {
+  const members = state.members || [];
+  app.innerHTML = `
+    <form class="login" id="loginForm" autocomplete="off">
+      <h1>Sign in</h1>
+      <p>Pick your name and enter your PIN.</p>
+      <label class="field">Name
+        <select id="loginMember" required ${members.length ? '' : 'disabled'}>
+          ${members.length ? members.map(m => `<option value="${m.id}">${esc(m.name)}${m.role === 'admin' ? ' (admin)' : ''}</option>`).join('') : '<option>Loading names…</option>'}
+        </select>
+      </label>
+      <label class="field">PIN
+        <input id="loginPin" type="password" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" required autocomplete="off">
+      </label>
+      <label class="check"><input type="checkbox" id="loginRemember" checked> Keep me signed in on this device</label>
+      <button class="btn primary" type="submit" id="loginBtn">Sign in</button>
+      <p class="error" id="loginError">${esc(msg || '')}</p>
+    </form>`;
+  if (!state.members) {
+    rpc('tt_members_list').then(list => { state.members = list; if (!state.session) renderLogin(msg); })
+      .catch(e => { $('#loginError').textContent = e.message; });
+  } else {
+    const last = loadSession();
+    if (last && last.id) $('#loginMember').value = String(last.id);
+  }
+}
+async function doLogin(ev) {
+  ev.preventDefault();
+  const id = Number($('#loginMember').value), pin = $('#loginPin').value.trim();
+  const btn = $('#loginBtn'); btn.disabled = true; $('#loginError').textContent = '';
+  try {
+    const r = await rpc('tt_login', { p_member_id: id, p_pin: pin });
+    state.session = { id: r.id, name: r.name, role: r.role, pin };
+    storeSession(state.session, $('#loginRemember').checked);
+    state.today = r.server_date; state.month = r.server_date.slice(0, 7);
+    render();
+    await loadData();
+  } catch (e) {
+    btn.disabled = false;
+    $('#loginError').textContent = e.code === 'INVALID_PIN' ? 'That name and PIN don’t match.' : e.message;
+  }
+}
+
+/* ---------- data ---------- */
+async function loadData() {
+  const s = state.session; if (!s) return;
+  const { start, end } = monthInfo(state.month);
+  state.loading = true; render();
+  try {
+    const params = { p_member_id: s.id, p_pin: s.pin, p_from: start, p_to: end };
+    const data = await rpc(s.role === 'admin' ? 'tt_admin_overview' : 'tt_my_tasks', params);
+    state.today = data.server_date; state.data = data; state.loading = false;
+    render();
+  } catch (e) {
+    state.loading = false;
+    if (e.code === 'INVALID_PIN') { signOut('Your PIN has changed. Please sign in again.'); return; }
+    if (!state.data) { app.innerHTML = `<p class="empty">${esc(e.message)} <button class="btn sm" data-act="retry" type="button">Try again</button></p>`; renderChrome(); }
+    else { render(); toast(e.message, true); }
+  }
+}
+function signOut(msg) {
+  clearSession();
+  state.session = null; state.data = null; state.today = null; state.month = null; state.adminFilter = 'all';
+  render(); if (msg) $('#loginError').textContent = msg;
+}
+
+async function saveStatus(taskId, date, status, remarks) {
+  const s = state.session, key = taskId + '|' + date;
+  state.saving.add(key); render();
+  try {
+    const rec = await rpc('tt_set_status', { p_member_id: s.id, p_pin: s.pin, p_task_id: taskId, p_due_date: date, p_status: status, p_remarks: remarks || null });
+    const list = state.data.status, i = list.findIndex(r => r.task_id === rec.task_id && r.due_date === rec.due_date);
+    if (i >= 0) list[i] = rec; else list.push(rec);
+    toast(status === 'Done' ? 'Marked done' : 'Saved');
+  } catch (e) {
+    if (e.code === 'INVALID_PIN') { signOut('Your PIN has changed. Please sign in again.'); return; }
+    toast(`Couldn’t save: ${e.message}`, true);
+  } finally {
+    state.saving.delete(key); render();
+  }
+}
+
+/* ---------- member view ---------- */
+function renderMember() {
+  const { occs, byKey } = buildModel();
+  const { today, month } = state;
+  const isCur = month === today.slice(0, 7);
+  const isPast = month < today.slice(0, 7);
+
+  const dueToday = occs.filter(o => o.date === today);
+  const todayDone = dueToday.filter(o => o.state === 'done').length;
+  const deadlineOpen = isCur ? occs.filter(o => o.deadline && o.state !== 'done' && o.date !== today) : [];
+  const overdue = occs.filter(o => o.state === 'overdue');
+  const soon = isCur ? occs.filter(o => o.task.freq_type === 'monthly' && !o.deadline && o.state === 'upcoming' && daysBetween(today, o.date) <= CONFIG.SOON_DAYS) : [];
+  const past = occs.filter(o => o.date <= today), pastDone = past.filter(o => o.state === 'done').length;
+
+  let html = '';
+  if (isCur) {
+    const parts = [];
+    parts.push(dueToday.length ? `${todayDone} of ${dueToday.length} tasks done today.` : 'No tasks are scheduled for today.');
+    if (deadlineOpen.length) parts.push(`${deadlineOpen.length} deadline-based task${deadlineOpen.length === 1 ? '' : 's'} still open this month.`);
+    parts.push(overdue.length ? `${overdue.length} not done from earlier this month.` : (past.length ? 'Nothing outstanding from earlier this month.' : ''));
+    html += `<div class="pagehead"><div><h1>${fmt('long', today)}</h1><p class="lede">${parts.join(' ')}</p></div></div>`;
+  } else {
+    html += `<div class="pagehead"><div><h1>${fmt('month', month + '-01')}</h1><p class="lede">${pastDone} of ${past.length} tasks done (${pct(pastDone, past.length)}%). ${overdue.length ? `${overdue.length} not done.` : ''}</p></div></div>`;
+  }
+
+  if (isCur) {
+    const groups = [
+      ['Daily', dueToday.filter(o => o.task.freq_type === 'daily')],
+      ['Weekly', dueToday.filter(o => o.task.freq_type === 'weekly')],
+      ['Monthly', dueToday.filter(o => o.task.freq_type === 'monthly' && !o.deadline)],
+      ['Deadline-based, this month', [...dueToday.filter(o => o.deadline), ...deadlineOpen]],
+      ['Coming up', soon],
+    ].filter(g => g[1].length);
+    html += `<section class="panel"><div class="panel-head"><h2>Today</h2><span class="meta">Remarks save when you leave the field</span></div>`;
+    if (!groups.length) {
+      html += `<p class="empty">Nothing is due today${CONFIG.WORKDAYS.includes(weekday(today)) ? '' : ' (weekend)'}.</p>`;
+    } else {
+      html += `<div class="row head"><div>Task</div><div>Due</div><div>Status</div><div>Remarks</div><div style="text-align:right">Updated</div></div>`;
+      for (const [label, list] of groups) {
+        html += `<div class="row sub">${label}</div>` + list.map(rowHTML).join('');
+      }
+    }
+    html += `</section>`;
+  }
+
+  // not done earlier
+  if (overdue.length) {
+    const byTask = new Map();
+    for (const o of overdue) { if (!byTask.has(o.task.id)) byTask.set(o.task.id, []); byTask.get(o.task.id).push(o); }
+    html += `<section class="panel"><div class="panel-head"><h2>Not done ${isCur ? 'earlier this month' : 'in ' + fmt('month', month + '-01')}</h2><span class="meta">Click a date to update it</span></div>`;
+    for (const [tid, list] of byTask) {
+      const t = list[0].task;
+      html += `<div class="attn"><div><div class="t">${esc(t.title)}</div><div class="meta">${esc(t.frequency_text)}</div></div><div class="chips">${list.map(o => `<button type="button" class="chip" data-act="cell" data-key="${o.key}" data-tip="${esc(tipFor(o))}">${ICON.overdue}${fmt('day', o.date)}${o.rec && o.rec.remarks ? ' <span class="muted">(has remarks)</span>' : ''}</button>`).join('')}</div></div>`;
+    }
+    html += `</section>`;
+  }
+
+  // month grid
+  const groups = [['Daily', 'daily'], ['Weekly', 'weekly'], ['Monthly', 'monthly']]
+    .map(([label, ft]) => ({ label, tasks: state.data.tasks.filter(t => t.freq_type === ft) })).filter(g => g.tasks.length);
+  html += `<section class="panel"><div class="panel-head"><h2>${fmt('month', month + '-01')} at a glance</h2><span class="meta">${isPast ? 'Click a mark to update it' : 'Click a mark to update it; future days open when they arrive'}</span></div>`
+    + gridHTML(groups, byKey, month, today, true) + legendHTML() + `</section>`;
+
+  app.innerHTML = html;
+}
+
+function rowHTML(o) {
+  const rec = o.rec, status = rec ? rec.status : 'Pending', remarks = rec && rec.remarks ? rec.remarks : '';
+  const saving = state.saving.has(o.key);
+  const dueCls = o.state === 'overdue' ? 'late' : (o.date === state.today ? 'today' : '');
+  return `<div class="row ${o.state === 'done' ? 'is-done' : ''}" data-key="${o.key}" data-task="${o.task.id}" data-date="${o.date}">
+    <div class="c-task"><div class="t">${esc(o.task.title)}</div><div class="meta">${esc(o.task.frequency_text)}</div></div>
+    <div class="c-due ${dueCls}">${dueLabel(o)}</div>
+    <div class="c-status"><div class="seg" role="group" aria-label="Status for ${esc(o.task.title)}">
+      <button type="button" data-act="status" data-v="Pending" class="${status === 'Pending' ? 'on-pending' : ''}" aria-pressed="${status === 'Pending'}">Pending</button>
+      <button type="button" data-act="status" data-v="Done" class="${status === 'Done' ? 'on-done' : ''}" aria-pressed="${status === 'Done'}">Done</button>
+    </div></div>
+    <div class="c-remarks"><input class="remarks" data-act="remarks" data-fkey="${o.key}" value="${esc(remarks)}" placeholder="Add a remark" maxlength="500" aria-label="Remarks for ${esc(o.task.title)}"></div>
+    <div class="c-upd">${saving ? 'Saving…' : (rec ? fmtStamp(rec.updated_at) : '')}</div>
+  </div>`;
+}
+
+function gridHTML(groups, byKey, ym, today, editable, memberNames) {
+  const mi = monthInfo(ym);
+  const days = Array.from({ length: mi.days }, (_, i) => i + 1);
+  const curEnd = monthInfo(today.slice(0, 7)).end;
+  const colCls = ds => `day${CONFIG.WORKDAYS.includes(weekday(ds)) ? '' : ' wkend'}${ds === today ? ' today' : ''}`;
+  let html = `<div class="gridwrap"><table class="grid"><thead><tr><th class="task-col">Task</th>${days.map(d => { const ds = ymd(mi.y, mi.m, d); return `<th class="${colCls(ds)}"><span class="dn">${d}</span><span class="dw">${'SMTWTFS'[weekday(ds)]}</span></th>`; }).join('')}</tr></thead><tbody>`;
+  for (const g of groups) {
+    html += `<tr class="group"><td class="task-col">${esc(g.label)}</td><td colspan="${mi.days}"></td></tr>`;
+    for (const t of g.tasks) {
+      const hasAny = days.some(d => byKey.has(t.id + '|' + ymd(mi.y, mi.m, d)));
+      html += `<tr><td class="task-col" title="${esc(t.title)}">${esc(t.title)}${hasAny ? '' : ' <span class="meta">(no date this month)</span>'}</td>`;
+      for (const d of days) {
+        const ds = ymd(mi.y, mi.m, d), o = byKey.get(t.id + '|' + ds);
+        if (!o) { html += `<td class="${colCls(ds)}"></td>`; continue; }
+        const canOpen = !editable || o.date <= today || (o.task.freq_type === 'monthly' && o.date <= curEnd);
+        const tip = tipFor(o, memberNames ? memberNames.get(t.member_id) : null);
+        html += `<td class="${colCls(ds)}"><button type="button" class="dot s-${o.state}${o.rec && o.rec.remarks ? ' has-note' : ''}" data-act="cell" data-key="${o.key}" data-tip="${esc(tip)}" aria-label="${esc(tip)}" ${canOpen ? '' : 'disabled'}>${ICON[o.state]}</button></td>`;
+      }
+      html += `</tr>`;
+    }
+  }
+  return html + `</tbody></table></div>`;
+}
+function legendHTML() {
+  return `<div class="legend"><span>${ICON.done} Done</span><span>${ICON.due} Due today</span><span>${ICON.overdue} Not done</span><span>${ICON.upcoming} Not yet due</span><span><i class="notedot"></i> Has remarks</span><span><i class="sw"></i> Weekend</span></div>`;
+}
+
+/* ---------- admin view ---------- */
+function renderAdmin() {
+  const { occs, byKey } = buildModel();
+  const { today, month, data } = state;
+  const isCur = month === today.slice(0, 7);
+  const memberName = new Map(data.members.map(m => [m.id, m.name]));
+  const filter = state.adminFilter;
+  const scoped = filter === 'all' ? occs : occs.filter(o => o.task.member_id === filter);
+
+  const dueToday = scoped.filter(o => o.date === today), todayDone = dueToday.filter(o => o.state === 'done').length;
+  const past = scoped.filter(o => o.date <= today), pastDone = past.filter(o => o.state === 'done').length;
+  const overdue = scoped.filter(o => o.state === 'overdue');
+  const recs = data.status.filter(r => filter === 'all' || (byKey.get(r.task_id + '|' + r.due_date) || {}).task?.member_id === filter);
+  const taskById = new Map(data.tasks.map(t => [t.id, t]));
+  const lastRec = recs.slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+
+  let html = `<div class="pagehead"><div><h1>${isCur ? fmt('long', today) : fmt('month', month + '-01')}</h1><p class="lede">${filter === 'all' ? 'Whole team' : esc(memberName.get(filter))}${isCur ? '' : ' (past month)'}</p></div></div>`;
+
+  html += `<div class="filters">
+    <label>Member <select class="ctl" data-act="admin-filter"><option value="all" ${filter === 'all' ? 'selected' : ''}>All members</option>${data.members.map(m => `<option value="${m.id}" ${filter === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+    <span class="spacer"></span>
+    <button class="btn sm" type="button" data-act="export">Download CSV</button>
+    <button class="btn sm" type="button" data-act="reset-pin">Reset a PIN</button>
+  </div>`;
+
+  html += `<div class="figures">
+    ${isCur ? `<div class="fig"><div class="label">Done today</div><div class="value">${todayDone}<small>of ${dueToday.length}</small></div><div class="sub">${dueToday.length ? pct(todayDone, dueToday.length) + '% of today’s tasks' : 'nothing scheduled today'}</div></div>` : ''}
+    <div class="fig"><div class="label">${isCur ? 'Month to date' : 'Completed'}</div><div class="value">${pct(pastDone, past.length)}<small>%</small></div><div class="sub">${pastDone} of ${past.length} tasks due${isCur ? ' so far' : ''}</div></div>
+    <div class="fig"><div class="label">Not done</div><div class="value ${overdue.length ? 'count-bad' : ''}">${overdue.length}</div><div class="sub">past their date this month</div></div>
+    <div class="fig"><div class="label">Last update</div><div class="value" style="font-size:18px">${lastRec ? fmtStamp(lastRec.updated_at) : '—'}</div><div class="sub">${lastRec ? 'by ' + esc(memberName.get(taskById.get(lastRec.task_id)?.member_id) || '') : 'no updates yet this month'}</div></div>
+  </div>`;
+
+  // team table
+  if (filter === 'all') {
+    html += `<section class="panel"><div class="panel-head"><h2>Team</h2><span class="meta">Month to date = done ÷ due up to today</span></div><div class="tablewrap"><table class="data"><thead><tr>
+      <th>Member</th><th class="num">Tasks</th><th class="num">Due today</th><th class="num">Done today</th><th>Month to date</th><th class="num">Not done</th><th>Last update</th><th></th></tr></thead><tbody>`;
+    for (const m of data.members) {
+      const mo = occs.filter(o => o.task.member_id === m.id);
+      const dt = mo.filter(o => o.date === today), dd = dt.filter(o => o.state === 'done').length;
+      const pa = mo.filter(o => o.date <= today), pd = pa.filter(o => o.state === 'done').length;
+      const od = mo.filter(o => o.state === 'overdue').length;
+      const last = data.status.filter(r => taskById.get(r.task_id)?.member_id === m.id).sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+      html += `<tr><td class="name">${esc(m.name)}</td><td class="num">${data.tasks.filter(t => t.member_id === m.id).length}</td><td class="num">${dt.length}</td><td class="num">${dd}</td>
+        <td><span class="meter" aria-hidden="true"><i style="width:${pct(pd, pa.length)}%"></i></span><span class="num">${pct(pd, pa.length)}%</span> <span class="meta num">(${pd}/${pa.length})</span></td>
+        <td class="num ${od ? 'count-bad' : ''}">${od}</td><td class="meta">${last ? fmtStamp(last.updated_at) : '—'}</td>
+        <td><button class="btn sm" type="button" data-act="view-member" data-id="${m.id}">View</button></td></tr>`;
+    }
+    html += `</tbody></table></div></section>`;
+  }
+
+  // trend
+  const trendDays = [...new Set(scoped.filter(o => o.date <= today).map(o => o.date))].sort();
+  const points = trendDays.map(ds => { const l = scoped.filter(o => o.date === ds); const dn = l.filter(o => o.state === 'done').length; return { date: ds, day: Number(ds.slice(8)), due: l.length, done: dn, pct: pct(dn, l.length) }; });
+  html += `<section class="panel"><div class="panel-head"><h2>Daily completion</h2><span class="meta">share of tasks due each day that were marked done</span></div><div class="panel-body" id="trendBox">`
+    + (points.length ? trendSVG(points, Math.min(1180, Math.max(320, app.clientWidth - 66))) : '<p class="muted">No days to show yet.</p>')
+    + (points.length ? `<details class="tableview"><summary>Show as table</summary><table class="data"><thead><tr><th>Date</th><th class="num">Due</th><th class="num">Done</th><th class="num">%</th></tr></thead><tbody>${points.map(p => `<tr><td>${fmt('short', p.date)}</td><td class="num">${p.due}</td><td class="num">${p.done}</td><td class="num">${p.pct}%</td></tr>`).join('')}</tbody></table></details>` : '')
+    + `</div></section>`;
+
+  // open items
+  const open = scoped.filter(o => (o.state === 'overdue' || o.state === 'due')).sort((a, b) => a.date.localeCompare(b.date) || (memberName.get(a.task.member_id) || '').localeCompare(memberName.get(b.task.member_id) || '') || a.task.sort_order - b.task.sort_order);
+  const LIMIT = 60, shown = state.showAllOpen ? open : open.slice(0, LIMIT);
+  html += `<section class="panel"><div class="panel-head"><h2>Open items</h2><span class="meta">${open.length} not done up to today</span></div>`;
+  if (!open.length) html += `<p class="empty">Everything due so far is done.</p>`;
+  else {
+    html += `<div class="tablewrap"><table class="data"><thead><tr><th>Member</th><th>Task</th><th>Due</th><th>Status</th><th>Remarks</th><th>Updated</th></tr></thead><tbody>`;
+    for (const o of shown) {
+      const late = daysBetween(o.date, today);
+      html += `<tr><td class="name">${esc(memberName.get(o.task.member_id))}</td><td>${esc(o.task.title)} <span class="meta">${esc(o.task.frequency_text)}</span></td><td class="num">${fmt('day', o.date)}</td>
+        <td><span class="pill">${o.state === 'due' ? ICON.due + ' Due today' : ICON.overdue + ` Not done (${late} day${late === 1 ? '' : 's'} late)`}${o.rec && o.rec.status === 'Pending' ? ' <span class="meta">pending</span>' : ''}</span></td>
+        <td class="remarks">${esc(o.rec && o.rec.remarks || '')}</td><td class="meta">${o.rec ? fmtStamp(o.rec.updated_at) : ''}</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+    if (open.length > LIMIT && !state.showAllOpen) html += `<div class="panel-body"><button class="btn sm" type="button" data-act="show-all-open">Show all ${open.length}</button></div>`;
+  }
+  html += `</section>`;
+
+  // remarks log
+  const noted = recs.filter(r => r.remarks).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  if (noted.length) {
+    html += `<section class="panel"><details><summary class="panel-head" style="cursor:pointer"><h2 style="display:inline">Remarks this month</h2><span class="meta">${noted.length}</span></summary><div class="tablewrap"><table class="data"><thead><tr><th>Member</th><th>Task</th><th>Date</th><th>Status</th><th>Remarks</th><th>Updated</th></tr></thead><tbody>${noted.map(r => { const t = taskById.get(r.task_id); return `<tr><td class="name">${esc(memberName.get(t?.member_id))}</td><td>${esc(t?.title)}</td><td class="num">${fmt('day', r.due_date)}</td><td>${esc(r.status)}</td><td class="remarks">${esc(r.remarks)}</td><td class="meta">${fmtStamp(r.updated_at)}</td></tr>`; }).join('')}</tbody></table></div></details></section>`;
+  }
+
+  // grid
+  const order = { daily: 0, weekly: 1, monthly: 2 };
+  const groups = (filter === 'all' ? data.members : data.members.filter(m => m.id === filter)).map(m => ({
+    label: m.name, tasks: data.tasks.filter(t => t.member_id === m.id).sort((a, b) => order[a.freq_type] - order[b.freq_type] || a.sort_order - b.sort_order),
+  })).filter(g => g.tasks.length);
+  html += `<section class="panel" id="gridPanel"><div class="panel-head"><h2>${fmt('month', month + '-01')} at a glance</h2><span class="meta">Hover or click a mark for details</span></div>` + gridHTML(groups, byKey, month, today, false, memberName) + legendHTML() + `</section>`;
+
+  app.innerHTML = html;
+}
+
+function trendSVG(points, W) {
+  const H = 170, padL = 36, padR = 8, padT = 12, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = points.length, band = plotW / n, bw = Math.min(24, band * 0.62);
+  const y = v => padT + plotH * (1 - v / 100);
+  const step = Math.max(1, Math.ceil(18 / band));
+  let s = `<svg class="trend" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily completion this month">`;
+  for (const g of [0, 50, 100]) s += `<line class="gl" x1="${padL}" x2="${W - padR}" y1="${y(g)}" y2="${y(g)}"/><text class="tick" x="${padL - 6}" y="${y(g) + 4}" text-anchor="end">${g}%</text>`;
+  points.forEach((p, i) => {
+    const x0 = padL + band * i, x = x0 + (band - bw) / 2, top = y(p.pct), h = Math.max(0, y(0) - top), r = Math.min(4, h, bw / 2);
+    const path = h > 0 ? `M${x},${y(0)} V${top + r} a${r},${r} 0 0 1 ${r},-${r} H${x + bw - r} a${r},${r} 0 0 1 ${r},${r} V${y(0)} Z` : '';
+    const tip = `${fmt('short', p.date)}\n${p.done} of ${p.due} done (${p.pct}%)`;
+    s += `<g class="bar" tabindex="0" data-tip="${esc(tip)}" aria-label="${esc(tip)}"><rect class="hit" x="${x0}" y="${padT}" width="${band}" height="${plotH}"/>${path ? `<path class="fill" d="${path}"/>` : `<rect class="fill" x="${x}" y="${y(0) - 1}" width="${bw}" height="1"/>`}${i % step === 0 ? `<text class="xlab" x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${p.day}</text>` : ''}</g>`;
+  });
+  return s + `</svg>`;
+}
+
+/* ---------- dialogs ---------- */
+function openCell(key) {
+  const { byKey } = buildModel();
+  const o = byKey.get(key); if (!o) return;
+  if (state.session.role === 'admin') return openDetails(o);
+  const rec = o.rec, status = rec ? rec.status : 'Pending';
+  dlg.innerHTML = `<div class="dlg">
+    <h3>${esc(o.task.title)}</h3>
+    <p class="meta">${esc(o.task.frequency_text)}. ${fmt('long', o.date)}${o.deadline ? ' (per deadline)' : ''}.</p>
+    <div class="seg big" role="group" aria-label="Status">
+      <button type="button" data-act="dlg-status" data-v="Pending" class="${status === 'Pending' ? 'on-pending' : ''}" aria-pressed="${status === 'Pending'}">Pending</button>
+      <button type="button" data-act="dlg-status" data-v="Done" class="${status === 'Done' ? 'on-done' : ''}" aria-pressed="${status === 'Done'}">Done</button>
+    </div>
+    <label class="field">Remarks<textarea class="remarks" id="dlgRemarks" maxlength="500" placeholder="Optional">${esc(rec && rec.remarks || '')}</textarea></label>
+    ${rec ? `<p class="meta" style="margin-top:8px">Last updated ${fmtStamp(rec.updated_at)}</p>` : ''}
+    <div class="actions"><button class="btn" type="button" data-act="dlg-close">Cancel</button><button class="btn primary" type="button" data-act="dlg-save">Save</button></div>
+  </div>`;
+  dlg.dataset.key = key; dlg.dataset.status = status; dlg.dataset.task = o.task.id; dlg.dataset.date = o.date;
+  dlg.showModal();
+}
+function openDetails(o) {
+  const memberName = new Map(state.data.members.map(m => [m.id, m.name]));
+  dlg.innerHTML = `<div class="dlg">
+    <h3>${esc(o.task.title)}</h3>
+    <p class="meta">${esc(memberName.get(o.task.member_id))}. ${esc(o.task.frequency_text)}.</p>
+    <dl class="kv"><dt>Date</dt><dd>${fmt('long', o.date)}</dd><dt>Status</dt><dd><span class="pill">${ICON[o.state]} ${STATE_LABEL[o.state]}${o.rec && o.rec.status === 'Pending' && o.state !== 'done' ? ' (marked pending)' : ''}</span></dd><dt>Remarks</dt><dd>${esc(o.rec && o.rec.remarks || '—')}</dd><dt>Updated</dt><dd>${o.rec ? fmtStamp(o.rec.updated_at) : '—'}</dd></dl>
+    <div class="actions"><button class="btn" type="button" data-act="dlg-close">Close</button></div>
+  </div>`;
+  dlg.showModal();
+}
+function openChangePin() {
+  dlg.innerHTML = `<form class="dlg" id="pinForm">
+    <h3>Change your PIN</h3>
+    <label class="field">New PIN (4 to 8 digits)<input id="pin1" type="password" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required autocomplete="new-password"></label>
+    <label class="field">Repeat new PIN<input id="pin2" type="password" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required autocomplete="new-password"></label>
+    <p class="error" id="pinError"></p>
+    <div class="actions"><button class="btn" type="button" data-act="dlg-close">Cancel</button><button class="btn primary" type="submit">Save PIN</button></div>
+  </form>`;
+  dlg.showModal();
+  $('#pinForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const a = $('#pin1').value, b = $('#pin2').value;
+    if (a !== b) { $('#pinError').textContent = 'The two PINs don’t match.'; return; }
+    try {
+      await rpc('tt_change_pin', { p_member_id: state.session.id, p_pin: state.session.pin, p_new_pin: a });
+      state.session.pin = a; storeSession(state.session, !!localStorage.getItem(SKEY));
+      dlg.close(); toast('PIN changed');
+    } catch (e) { $('#pinError').textContent = e.message; }
+  });
+}
+function openResetPin() {
+  const everyone = [...state.data.members, { id: state.session.id, name: state.session.name + ' (admin)' }];
+  dlg.innerHTML = `<form class="dlg" id="resetForm">
+    <h3>Reset a PIN</h3>
+    <label class="field">Member<select id="resetWho">${everyone.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></label>
+    <label class="field">New PIN (4 to 8 digits)<input id="resetPin" type="text" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required autocomplete="off"></label>
+    <p class="error" id="resetError"></p>
+    <div class="actions"><button class="btn" type="button" data-act="dlg-close">Cancel</button><button class="btn primary" type="submit">Set PIN</button></div>
+  </form>`;
+  dlg.showModal();
+  $('#resetForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const who = Number($('#resetWho').value), pin = $('#resetPin').value;
+    try {
+      await rpc('tt_admin_set_pin', { p_member_id: state.session.id, p_pin: state.session.pin, p_target_id: who, p_new_pin: pin });
+      if (who === state.session.id) { state.session.pin = pin; storeSession(state.session, !!localStorage.getItem(SKEY)); }
+      dlg.close(); toast('PIN updated');
+    } catch (e) { $('#resetError').textContent = e.message; }
+  });
+}
+
+/* ---------- export ---------- */
+function exportCSV() {
+  const { occs } = buildModel();
+  const memberName = new Map(state.data.members.map(m => [m.id, m.name]));
+  const rows = [['Member', 'Task', 'Frequency', 'Due date', 'State', 'Recorded status', 'Remarks', 'Updated (PKT)']];
+  for (const o of occs) rows.push([memberName.get(o.task.member_id) || '', o.task.title, o.task.frequency_text, o.date, STATE_LABEL[o.state], o.rec ? o.rec.status : '', o.rec && o.rec.remarks || '', o.rec ? fmtStamp(o.rec.updated_at) : '']);
+  const csv = '﻿' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `task-tracker-${state.month}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/* ---------- tooltip & toast ---------- */
+const tipEl = $('#tip');
+function showTip(target) {
+  const text = target.getAttribute('data-tip'); if (!text) return;
+  tipEl.textContent = text; tipEl.classList.add('show');
+  const r = target.getBoundingClientRect(), tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+  let x = r.left + r.width / 2 - tw / 2, y = r.top - th - 8;
+  if (y < 8) y = r.bottom + 8;
+  x = Math.max(8, Math.min(x, window.innerWidth - tw - 8));
+  tipEl.style.left = x + 'px'; tipEl.style.top = y + 'px';
+}
+function hideTip() { tipEl.classList.remove('show'); }
+let toastTimer;
+function toast(msg, isError) {
+  const el = $('#toast'); el.textContent = msg; el.classList.toggle('error', !!isError); el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), isError ? 5000 : 1800);
+}
+
+/* ---------- events ---------- */
+document.addEventListener('mouseover', e => { const t = e.target.closest('[data-tip]'); if (t) showTip(t); });
+document.addEventListener('mouseout', e => { if (e.target.closest('[data-tip]')) hideTip(); });
+document.addEventListener('focusin', e => { const t = e.target.closest('[data-tip]'); if (t) showTip(t); });
+document.addEventListener('focusout', e => { if (e.target.closest('[data-tip]')) hideTip(); });
+window.addEventListener('scroll', hideTip, { passive: true });
+
+app.addEventListener('submit', e => { if (e.target.id === 'loginForm') doLogin(e); });
+app.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'status') {
+    const row = b.closest('.row');
+    saveStatus(Number(row.dataset.task), row.dataset.date, b.dataset.v, row.querySelector('input.remarks').value.trim());
+  } else if (act === 'cell') { hideTip(); openCell(b.dataset.key); }
+  else if (act === 'retry') { loadData(); }
+  else if (act === 'export') { exportCSV(); }
+  else if (act === 'reset-pin') { openResetPin(); }
+  else if (act === 'view-member') { state.adminFilter = Number(b.dataset.id); render(); $('#gridPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  else if (act === 'show-all-open') { state.showAllOpen = true; render(); }
+});
+app.addEventListener('change', e => {
+  const el = e.target;
+  if (el.dataset.act === 'remarks') {
+    const row = el.closest('.row'), key = row.dataset.key;
+    const rec = state.data.status.find(r => r.task_id + '|' + r.due_date === key);
+    const prev = rec && rec.remarks || '';
+    if (el.value.trim() !== prev) saveStatus(Number(row.dataset.task), row.dataset.date, rec ? rec.status : 'Pending', el.value.trim());
+  } else if (el.dataset.act === 'admin-filter') {
+    state.adminFilter = el.value === 'all' ? 'all' : Number(el.value); state.showAllOpen = false; render();
+  }
+});
+app.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.dataset && e.target.dataset.act === 'remarks') { e.preventDefault(); e.target.blur(); } });
+
+dlg.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) { if (e.target === dlg) dlg.close(); return; }
+  const act = b.dataset.act;
+  if (act === 'dlg-close') dlg.close();
+  else if (act === 'dlg-status') {
+    dlg.dataset.status = b.dataset.v;
+    dlg.querySelectorAll('[data-act="dlg-status"]').forEach(x => { const on = x.dataset.v === b.dataset.v; x.className = on ? (b.dataset.v === 'Done' ? 'on-done' : 'on-pending') : ''; x.setAttribute('aria-pressed', on); });
+  } else if (act === 'dlg-save') {
+    const remarks = $('#dlgRemarks').value.trim();
+    dlg.close();
+    saveStatus(Number(dlg.dataset.task), dlg.dataset.date, dlg.dataset.status, remarks);
+  }
+});
+
+$('#prevMonth').addEventListener('click', () => { state.month = shiftMonth(state.month, -1); state.showAllOpen = false; loadData(); });
+$('#nextMonth').addEventListener('click', () => { state.month = shiftMonth(state.month, 1); state.showAllOpen = false; loadData(); });
+$('#thisMonth').addEventListener('click', () => { state.month = (state.today || localToday()).slice(0, 7); state.showAllOpen = false; loadData(); });
+$('#signOut').addEventListener('click', () => signOut());
+$('#changePin').addEventListener('click', openChangePin);
+let resizeTimer;
+window.addEventListener('resize', () => { if (state.session && state.session.role === 'admin' && state.data) { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); } });
+// refresh when the tab becomes visible again, and every 5 minutes while open (others may have updated)
+function refreshIfIdle() { if (!document.hidden && state.session && state.data && !state.loading && !dlg.open) loadData(); }
+document.addEventListener('visibilitychange', refreshIfIdle);
+setInterval(refreshIfIdle, 5 * 60 * 1000);
+
+/* ---------- start ---------- */
+(function start() {
+  const s = loadSession();
+  if (s && s.id && s.pin) {
+    state.session = s; state.today = localToday(); state.month = state.today.slice(0, 7);
+    render(); loadData();
+  } else {
+    render();
+  }
+})();
+</script>
+
+<!--
+  ============================================================================
+  Admin notes (run in the Supabase SQL editor of the project above)
+
+  Add a team member (they sign in with the PIN you set here):
+    insert into public.tt_members (name, role, pin_hash)
+    values ('New Name', 'member', extensions.crypt('123456', extensions.gen_salt('bf')));
+
+  Add a task for someone:
+    insert into public.tt_tasks (member_id, title, frequency_text, freq_type, weekday, due_day, sort_order)
+    select id, 'Task title', '10th of each month', 'monthly', null, 10, 99 from public.tt_members where name = 'Sajawal';
+    -- freq_type: 'daily' | 'weekly' (set weekday 0=Sun..6=Sat) | 'monthly' (set due_day, or null for "per deadline")
+
+  Retire a task (history is kept):   update public.tt_tasks set active = false where id = 123;
+  Deactivate a member:               update public.tt_members set active = false where name = 'Name';
+  ============================================================================
+-->
+</body>
+</html>
